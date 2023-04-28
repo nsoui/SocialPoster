@@ -1,0 +1,15 @@
+{
+    "insta": {
+        "facebook_page_id": "1234566788888888",
+        "app_id": "7070707070707070",
+        "app_secret": "x7x7x7x7x7x7x7x7x7c8d8",
+        "app_secret_src": "https://developers.facebook.com/apps/702222463690498/settings/basic/",
+        "user_token": "HKTKR<FD<L&L&L*Lˆlk669879879879879879879879ABABABABABABABABABABA",
+        "user_token_src": "https://developers.facebook.com/tools/accesstoken/"
+    },
+    "long_term_token": "XXXXX",
+    "ig_business_account_id": "XXXXXX",
+    "site": {
+        "posts" : "https://souissi.eu/api/posts.json"
+    }
+}
