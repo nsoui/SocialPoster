@@ -11,6 +11,8 @@ import logging
 
 # Needed to schedule the posts
 import schedule, time
+import re
+import urllib.parse
 
 with open("config.json", "r") as f:
     config = json.load(f)
@@ -94,14 +96,19 @@ class SocialPoster(BaseWorker):
                     'help': 'Will update app tokens from instagram. Will need a short-time token as well generated under https://developers.facebook.com/tools/explorer/'}),
             ('-token', {'action': 'store', 'dest': 'short_time_token', 'default': None, 'required': False,
                     'help': 'Short lived token generated https://developers.facebook.com/tools/explorer/'}),
-            ('-r', {'action': 'store_true', 'dest': 'recursive', 'default': False,
-                    'help': 'Process the given arguments recursively'}),
+            ('-hashs', {'action': 'store_true', 'dest': 'update_hashs', 'default': False,
+                    'help': 'Will update the hash,json file with the hashtags of the site and return'}),
+            ('-url', {'action': 'store', 'dest': 'url', 'default': None, 'required': False,
+                    'help': 'Temporarily overwrite the site url for debug purposes'}),
             ('-t', {'action': 'store_true', 'dest': 'testrun', 'default': False,
                     'help': 'Run a test process, does not modify anything on the disk'}),
+            ('-now', {'action': 'store_true', 'dest': 'now', 'default': False,
+                    'help': 'Post the pictures straight ahead instead of planning them for a daily upload'}),
             (("-newerthan"), {"action": "store", "dest": "newerthan", "default": None,
                                "help": r"Only process pictures newer than the given timestamp in the format YYYYMMDD"}),
             (("-olderthan"), {"action": "store", "dest": "olderthan", "default": None,
-                               "help": r"Only process pictures older than the given timestamp in the format YYYYMMDD"})
+                               "help": r"Only process pictures older than the given timestamp in the format YYYYMMDD"}),
+            ('-paths', {'nargs': '+', 'required': False, 'help': 'Specific posts to process'})                   
             ]
 
         BaseWorker.__init__(self, args=args, name=r"Social Poster", description=r"Post images automatically",
@@ -119,6 +126,10 @@ class SocialPoster(BaseWorker):
         
         self.posts_list = []
 
+        if self.args.url is not None:
+            self.logger.debug('Overwriting the site url with ' + self.args.url)
+            config['site']['url'] = self.args.url
+
     
         
 
@@ -126,10 +137,18 @@ class SocialPoster(BaseWorker):
     def printProgress(progress):
         print("[%d%%]" % progress)
 
-    @staticmethod
-    def getHashtags(tags):
-        r = set([ "#" + el.replace(" ", "_").lower() for el in tags])
-        r.update( set([ "#" + el.replace(" ", "").lower() for el in tags if " " in el]))
+    
+    def __getHashtags(self, tags):
+        r = set()
+        hashs = self.__read_hashtags()
+        for tag in tags:
+            if tag in hashs:
+                r.update( hashs[tag] )
+            else:
+                self.logger.warning("{} is missing from the hash table, adding it as-is".format(tag))
+                r.add( re.sub(r'[^\w_]', '', tag.lower()))
+                r.add( re.sub(r'[^\w]', '_', tag.lower()))
+        return r
 
         
         return r
@@ -178,7 +197,8 @@ class SocialPoster(BaseWorker):
         param['access_token'] = config['long_term_token']
         param['caption'] = post['caption']
         param['image_url'] =  post['image_url']
-        self.logger.info('Posting the picture {} with the caption:\n{}'.format(post['image_url'], post['caption']))
+        self.logger.info('Posting the picture {}\n===========================Caption:===============\n{}\n\n=================Hashtags=============\n{}'.format(post['image_url'], post['caption'], post['hashtags']))
+        
         if not self.args.testrun:
             r = self.__get_url(url, method='post', params=param)
             creation_id = r['id']
@@ -187,8 +207,42 @@ class SocialPoster(BaseWorker):
             param['access_token'] = config['long_term_token']
             param['creation_id'] = creation_id
             r = self.__get_url(url, method='post', params=param)
+            media_id = r['id']
+            url = graph_url + media_id +'/comments'
+            while len(post['hashtags']) > 0:
+                comment = []
+                while len(post['hashtags']) > 0 and len(comment) < 30:
+                    comment.append( post['hashtags'].pop())
+                param = dict()
+                param['message'] = ' '.join(comment)
+                param['access_token'] = config['long_term_token']
+                r = self.__get_url(url, method='post', params=param)
             return r
     
+    def __get_sorted_tags(self):
+        tags = self.__get_url( config['site']['url'] + config['site']['tags'])
+        tagslist = [(key, value['size']) for key, value in tags.items()]
+        tagslist = sorted(tagslist, key= lambda x : x[1])
+        self.logger.debug('Got the following sorted tags from the site:\n' + "\n".join([ '{}({})'.format(key, size) for key, size in tagslist ]) )
+        return tags
+    
+    def __read_hashtags(self):
+        with open("hash.json", "r") as f:
+            r = json.load(f)
+        return r
+
+    def __update_hashs(self, sorted_tags):
+        original_hashtags = self.__read_hashtags()
+        for tag in sorted_tags:
+            if tag not in original_hashtags:
+                self.logger.debug("Adding the tag {} to the list".format(tag) )
+                original_hashtags[tag] = []
+        self.logger.debug(original_hashtags)
+        if not self.args.testrun: 
+            with open(f"hash-updated.json", "w") as f:
+                json.dump(original_hashtags, f, indent=4)
+
+
     def run(self, call_back_to_report_progress_percentage=None):
         # Do we need new tokens?
         if self.args.update_tokens:
@@ -198,9 +252,17 @@ class SocialPoster(BaseWorker):
             else:
                 self.__update_tokens()
 
+        if self.args.update_hashs:
+            tags = self.__get_sorted_tags()
+            self.__update_hashs(tags)
+            return True
+
         # Get the lates pictures
-        url = config['site']['posts'] 
+        url = urllib.parse.urljoin( config['site']['url'], config['site']['posts'])
         posts = self.__get_url(url)
+        if self.args.paths is not None:
+            self.logger.info('Searching for {} specific paths within {} posts'.format(len(self.args.paths), len(posts)) )
+            self.logger.info(self.args.paths)
         for post in reversed(posts):
                 post['ts'] = datetime.strptime(post['date'], '%Y-%m-%d')
                 if self.args.newerthan_ts is not None and self.args.newerthan_ts != '' and self.args.newerthan_ts >= post['ts']:
@@ -208,6 +270,11 @@ class SocialPoster(BaseWorker):
                     continue
                 if self.args.olderthan_ts is not None and self.args.olderthan_ts != '' and self.args.olderthan_ts <= post['ts']:
                     self.logger.debug("Skipping too new file %s" % post['title'])
+                    continue
+
+                post['full_url'] = urllib.parse.urljoin(config['site']['url'], post['url'])
+
+                if self.args.paths is not None and post['full_url'] not in self.args.paths:
                     continue
                 
                 # This picture will be posted
@@ -220,12 +287,13 @@ class SocialPoster(BaseWorker):
                 post['caption'] += '\n💡 {}s iso{}'.format(post['exposure'], post['iso'])                
                 post['caption'] += '\n\nFind the original picture with more details at ' + 'https://souissi.eu/' + post['url'] 
                 post['caption'] += '\n\nMore of my work at ' + 'https://souissi.eu/'  
-                hashtags = SocialPoster.getHashtags(post['tags']+[post['city'], post['country'], post['camera'], post['lens']] )
-                post['caption'] += '\n\n' + ' '.join(hashtags)
+                hashtags = self.__getHashtags(post['tags']+[post['city'], post['country'], post['camera'], post['lens']] )
+                post['hashtags'] = [ '#'+ h for h in hashtags]
                 self.logger.debug('The generated caption is:\n{}'.format(post['caption']))
+                self.logger.debug('Posting with {} hashtags:\n{}'.format( len(post['hashtags']), post['hashtags']))
                 self.posts_list.append(post)
 
-        if (self.args.testrun):
+        if self.args.testrun or self.args.now :
             schedule.every(1).seconds.do(self.__post_image)
         else:
             schedule.every().day.at("21:30").do(self.__post_image)
